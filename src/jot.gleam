@@ -40,6 +40,8 @@ pub type Container {
 pub type Inline {
   Text(String)
   Link(content: List(Inline), destination: Destination)
+  Strong(List(Inline))
+  Emphasis(List(Inline))
 }
 
 pub type Destination {
@@ -426,7 +428,68 @@ fn parse_inline(in: Chars, text: String, acc: List(Inline)) -> List(Inline) {
         Some(#(link, in)) -> parse_inline(in, "", [link, Text(text), ..acc])
       }
     }
+    [c, ..rest] if c == "*" || c == "_" -> {
+      case parse_emphasis(c, rest, None) {
+        None -> parse_inline(rest, text <> c, acc)
+        Some(#(strong, in)) -> parse_inline(in, "", [strong, Text(text), ..acc])
+      }
+    }
     [c, ..rest] -> parse_inline(rest, text <> c, acc)
+  }
+}
+
+// parse strong or regular emphasis where em is "*" or "_"
+fn parse_emphasis(em: String, in: Chars, acc: Option(List(String))) {
+  // if this is the first pass, ensure the first character non-whitespace
+  case acc {
+    None -> {
+      case in {
+        [c, ..in] -> {
+          case is_whitespace(c) {
+            True -> None
+            False -> parse_emphasis(em, in, Some([c]))
+          }
+        }
+        _ -> parse_emphasis(em, in, Some([]))
+      }
+    }
+    Some(acc) ->
+      case in {
+        [] -> None
+        [e, ..rest] if e == em -> {
+          // check if the previous character was a space
+          case acc {
+            [] -> parse_emphasis(em, rest, Some([e, ..acc]))
+            [c, ..] -> {
+              case is_whitespace(c) {
+                True -> parse_emphasis(em, rest, Some([e, ..acc]))
+                False -> {
+                  let acc = list.reverse(acc)
+
+                  let emphasis =
+                    parse_inline(acc, "", [])
+                    |> container_for_emphasis(e)
+
+                  Some(#(emphasis, rest))
+                }
+              }
+            }
+          }
+        }
+        [c, ..rest] -> parse_emphasis(em, rest, Some([c, ..acc]))
+      }
+  }
+}
+
+fn is_whitespace(c: String) -> Bool {
+  c == " " || c == "\n" || c == "\t"
+}
+
+fn container_for_emphasis(c: String) {
+  case c {
+    "*" -> Strong
+    "_" -> Emphasis
+    _ -> panic
   }
 }
 
@@ -499,6 +562,14 @@ fn take_inline_text(inlines: List(Inline), acc: String) -> String {
       case first {
         Text(text) -> take_inline_text(rest, acc <> text)
         Link(nested, _) -> {
+          let acc = take_inline_text(nested, acc)
+          take_inline_text(rest, acc)
+        }
+        Strong(nested) -> {
+          let acc = take_inline_text(nested, acc)
+          take_inline_text(rest, acc)
+        }
+        Emphasis(nested) -> {
           let acc = take_inline_text(nested, acc)
           take_inline_text(rest, acc)
         }
@@ -608,6 +679,18 @@ fn inline_to_html(html: String, inline: Inline, refs: Refs) -> String {
       |> open_tag("a", destination_attribute(destination, refs))
       |> inlines_to_html(text, refs)
       |> close_tag("a")
+    }
+    Strong(inlines) -> {
+      html
+      |> open_tag("strong", dict.new())
+      |> inlines_to_html(inlines, refs)
+      |> close_tag("strong")
+    }
+    Emphasis(inlines) -> {
+      html
+      |> open_tag("em", dict.new())
+      |> inlines_to_html(inlines, refs)
+      |> close_tag("em")
     }
   }
 }
