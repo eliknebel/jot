@@ -1,5 +1,6 @@
 // TODO: collapse adjacent text nodes
 
+import gleam/io
 import gleam/dict.{type Dict}
 import gleam/int
 import gleam/list
@@ -418,82 +419,131 @@ fn take_heading_chars_newline_hash(
   }
 }
 
+type InlineParser =
+  fn(Chars, String) -> Option(#(List(Inline), Chars))
+
+// takes a list of parsers and returns the first successfully parsed result
+fn parse_any(
+  in: Chars,
+  text: String,
+  acc: List(Inline),
+  of parsers: List(InlineParser),
+) -> Option(#(Inline, Chars)) {
+  list.fold_until(parsers, None, fn(_, f) {
+    case f(in, text, acc) {
+      None -> list.Continue(None)
+      parsed -> list.Stop(parsed)
+    }
+  })
+}
+
 fn parse_inline(in: Chars, text: String, acc: List(Inline)) -> List(Inline) {
   case in {
     [] if text == "" -> list.reverse(acc)
     [] -> parse_inline([], "", [Text(text), ..acc])
-    ["[", ..rest] -> {
-      case parse_link(rest) {
-        None -> parse_inline(rest, text <> "[", acc)
-        Some(#(link, in)) -> parse_inline(in, "", [link, Text(text), ..acc])
-      }
-    }
-    [c, ..rest] if c == "*" || c == "_" -> {
-      case parse_emphasis(c, rest, None) {
+    [c, ..] ->
+      case
+        parse_any(in, text, acc, of: [
+          link,
+          emphasis("*"),
+          emphasis("_"),
+          smart_punctuation,
+        ])
+      {
+        // Some(#(inline, in)) -> parse_inline(in, "", [inline, Text(text), ..acc])
+        Some(#(parsed_acc, in)) -> parse_inline(in, "", parsed_acc)
         None -> parse_inline(rest, text <> c, acc)
-        Some(#(strong, in)) -> parse_inline(in, "", [strong, Text(text), ..acc])
       }
-    }
-    [c, ..rest] -> parse_inline(rest, text <> c, acc)
   }
 }
 
-// parse strong or regular emphasis where em is "*" or "_"
-fn parse_emphasis(em: String, in: Chars, acc: Option(List(String))) {
-  // if this is the first pass, ensure the first character non-whitespace
-  case acc {
-    None -> {
-      case in {
-        [c, ..in] -> {
-          case is_whitespace(c) {
-            True -> None
-            False -> parse_emphasis(em, in, Some([c]))
-          }
-        }
-        _ -> parse_emphasis(em, in, Some([]))
-      }
-    }
-    Some(acc) ->
-      case in {
-        [] -> None
-        [e, ..rest] if e == em -> {
-          // check if the previous character was a space
-          case acc {
-            [] -> parse_emphasis(em, rest, Some([e, ..acc]))
-            [c, ..] -> {
-              case is_whitespace(c) {
-                True -> parse_emphasis(em, rest, Some([e, ..acc]))
-                False -> {
-                  let acc = list.reverse(acc)
-
-                  let emphasis =
-                    parse_inline(acc, "", [])
-                    |> container_for_emphasis(e)
-
-                  Some(#(emphasis, rest))
-                }
-              }
+fn smart_punctuation(in: Chars) {
+  case in {
+    ["{", c, ..rest] -> {
+      case c {
+        "'" -> {
+          case take_until_forced_closing("'", rest, []) {
+            Some(#(chars, rest)) -> {
+              let inline = parse_inline(chars, "", [])
+              Some(#(SmartSingle(inline), rest))
             }
+            None -> None
           }
         }
-        [c, ..rest] -> parse_emphasis(em, rest, Some([c, ..acc]))
+        "\"" -> {
+          case take_until_forced_closing("\"", rest, []) {
+            Some(#(chars, rest)) -> {
+              let inline = parse_inline(chars, "", [])
+              Some(#(SmartDouble(inline), rest))
+            }
+            None -> None
+          }
+        }
       }
+    }
+    ["-", "-", "-", ..rest] -> Some(#(SmartHyphen(3), rest))
+    [".", ".", ".", ..rest] -> Some(#(SmartEllipsis, rest))
+    ["'", ..rest] -> {
+      case take_until_closing("'", rest, []) {
+        Some(#(chars, rest)) -> {
+          let inline = parse_inline(chars, "", [])
+          Some(#(SmartSingle(inline), rest))
+        }
+        None -> None
+      }
+    }
+    ["\"", ..rest] -> {
+      case take_until_closing("\"", rest, []) {
+        Some(#(chars, rest)) -> {
+          let inline = parse_inline(chars, "", [])
+          Some(#(SmartDouble(inline), rest))
+        }
+        None -> None
+      }
+    }
+    [c, ..rest] -> None
   }
 }
 
-fn is_whitespace(c: String) -> Bool {
-  c == " " || c == "\n" || c == "\t"
-}
-
-fn container_for_emphasis(c: String) {
-  case c {
-    "*" -> Strong
-    "_" -> Emphasis
-    _ -> panic
+fn take_until_forced_closing(
+  delim: String,
+  in: Chars,
+  acc: Chars,
+) -> Option(#(Chars, Chars)) {
+  case in {
+    [] -> None
+    [c, "}", ..rest] if c == delim -> Some(#(acc, rest))
+    [c, ..rest] -> take_until_forced_closing(delim, rest, [c, ..acc])
   }
 }
 
-fn parse_link(in: Chars) -> Option(#(Inline, Chars)) {
+fn take_until_closing(
+  delim: String,
+  in: Chars,
+  acc: Chars,
+) -> Option(#(Chars, Chars)) {
+  case in {
+    [] -> None
+    [c, ..rest] if c == delim -> Some(#(acc, rest))
+    [c, ..rest] -> take_until_closing(delim, rest, [c, ..acc])
+  }
+}
+
+fn take_until_last(
+  delim: String,
+  in: Chars,
+  acc: Chars,
+  result: Option(#(Chars, Chars)),
+) -> Option(#(Chars, Chars)) {
+  case in {
+    [] -> result
+    [c, ..rest] if c == delim ->
+      take_until_last(delim, rest, [c, ..acc], Some(#(acc, rest)))
+    [c, ..rest] -> take_until_last(delim, rest, [c, ..acc], result)
+  }
+}
+
+fn link(in: Chars) {
   case take_link_chars(in, []) {
     // This wasn't a link, it was just a `[` in the text
     None -> None
@@ -544,6 +594,75 @@ fn take_link_chars_destination(
   }
 }
 
+// parse strong or regular emphasis where em is either "*" or "_"
+fn emphasis(em: String) -> InlineParser {
+  fn(in: Chars, text, acc) {
+    case in {
+      [] -> None
+      [c, ..rest] if c == em -> {
+        // ensure the previous and next characters are non-whitespace
+        let next_is_whitespace = case rest {
+          [] -> False
+          [c, ..] -> is_whitespace(c)
+        }
+
+        case string.last(text), next_is_whitespace {
+          _, True -> None
+          Ok(c), False ->
+            case is_whitespace(c) {
+              True -> None
+              False -> take_emphasis_chars(em, rest, [])
+            }
+          _, False -> take_emphasis_chars(em, rest, [])
+        }
+      }
+      [_, ..] -> None
+    }
+  }
+}
+
+fn take_emphasis_chars(em: String, in: Chars, acc: List(String)) {
+  case in {
+    [] -> None
+    [e, ..rest] if e == em -> {
+      // check if the previous character was whitespace
+      case acc {
+        [] -> take_emphasis_chars(em, rest, [e, ..acc])
+        [c, ..] -> {
+          case is_whitespace(c) {
+            True -> take_emphasis_chars(em, rest, [e, ..acc])
+            False -> {
+              let acc = list.reverse(acc)
+
+              let emphasis =
+                parse_inline(acc, "", [])
+                |> container_for_emphasis(e)
+
+              Some(#(emphasis, rest))
+            }
+          }
+        }
+      }
+    }
+    [c, ..rest] -> take_emphasis_chars(em, rest, [c, ..acc])
+  }
+}
+
+fn is_whitespace(c: String) -> Bool {
+  c == " " || c == "\n" || c == "\t"
+}
+
+fn container_for_emphasis(c: String) {
+  case c {
+    "*" -> Strong
+    "_" -> Emphasis
+    _ -> {
+      io.print_error("Unknown emphasis character: " <> c)
+      panic
+    }
+  }
+}
+
 fn heading_level(in: Chars, level: Int) -> Option(#(Int, Chars)) {
   case in {
     ["#", ..rest] -> heading_level(rest, level + 1)
@@ -573,6 +692,16 @@ fn take_inline_text(inlines: List(Inline), acc: String) -> String {
           let acc = take_inline_text(nested, acc)
           take_inline_text(rest, acc)
         }
+        SmartSingle(nested) -> {
+          let acc = take_inline_text(nested, acc)
+          take_inline_text(rest, acc)
+        }
+        SmartDouble(nested) -> {
+          let acc = take_inline_text(nested, acc)
+          take_inline_text(rest, acc)
+        }
+        SmartHyphen(_) -> take_inline_text(rest, acc)
+        SmartEllipsis -> take_inline_text(rest, acc)
       }
   }
 }

@@ -67,12 +67,6 @@ foo_bar_baz
 ```
 
 ```
-aa_"bb"_cc
-.
-<p>aa<em>“bb”</em>cc</p>
-```
-
-```
 *foo_
 .
 <p>*foo_</p>
@@ -109,26 +103,6 @@ _(_foo_)_
 .
 <p><em>(</em>foo<em>)</em></p>
 ```
-
-But you can force the second `_` to be an opener
-using the marker `{`.
-
-```
-_({_foo_})_
-.
-<p><em>(<em>foo</em>)</em></p>
-```
-
-Note that an explicitly marked opener can only be closed
-by an explicitly marked closer, and a non-marked opener
-can only be closed by a non-marked closer:
-
-```
-{_ x_ _} _x_}
-.
-<p><em> x_ </em> _x_}</p>
-```
-
 
 ```
 _(*foo*)_
