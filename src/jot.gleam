@@ -426,7 +426,69 @@ fn parse_inline(in: Chars, text: String, acc: List(Inline)) -> List(Inline) {
         Some(#(link, in)) -> parse_inline(in, "", [link, Text(text), ..acc])
       }
     }
+    ["'", ..rest] -> {
+      case parse_smart_quote(rest, "'", "", []) {
+        None -> parse_inline(rest, text <> "’", acc)
+        Some(#(quoted, in)) ->
+          parse_inline(in, "", list.concat([quoted, [Text(text), ..acc]]))
+      }
+    }
+    ["\"", ..rest] -> {
+      case parse_smart_quote(rest, "\"", "", []) {
+        None -> parse_inline(rest, text <> "\"", acc)
+        Some(#(quoted, in)) ->
+          parse_inline(in, "", list.concat([quoted, [Text(text), ..acc]]))
+      }
+    }
     [c, ..rest] -> parse_inline(rest, text <> c, acc)
+  }
+}
+
+fn parse_smart_quote(
+  in: Chars,
+  delim: String,
+  prev: String,
+  acc: Chars,
+) -> Option(#(List(Inline), Chars)) {
+  case in {
+    [] -> None
+    [c, ..rest] -> {
+      case c == delim && is_valid_previous_char_for_quote(prev) {
+        True -> {
+          let result =
+            [Text(opening_smart_quote(c))]
+            |> list.append(parse_inline(list.reverse(acc), "", []))
+            |> list.append([Text(closing_smart_quote(c))])
+            |> list.reverse()
+
+          Some(#(result, rest))
+        }
+        False -> parse_smart_quote(rest, delim, c, [c, ..acc])
+      }
+    }
+  }
+}
+
+fn is_valid_previous_char_for_quote(c: String) -> Bool {
+  case c {
+    "\\" -> False
+    _ -> True
+  }
+}
+
+fn opening_smart_quote(for c: String) -> String {
+  case c {
+    "\"" -> "“"
+    "'" -> "‘"
+    _ -> c
+  }
+}
+
+fn closing_smart_quote(for c: String) -> String {
+  case c {
+    "\"" -> "”"
+    "'" -> "’"
+    _ -> c
   }
 }
 
