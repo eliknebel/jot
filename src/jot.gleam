@@ -1,5 +1,6 @@
 // TODO: collapse adjacent text nodes
 
+import gleam/io
 import gleam/dict.{type Dict}
 import gleam/int
 import gleam/list
@@ -453,15 +454,22 @@ fn parse_smart_quote(
   case in {
     [] -> None
     [c, ..rest] -> {
+      io.debug(#(c))
+
       case c == delim && is_valid_previous_char_for_quote(prev) {
         True -> {
-          let result =
-            [Text(opening_smart_quote(c))]
-            |> list.append(parse_inline(list.reverse(acc), "", []))
-            |> list.append([Text(closing_smart_quote(c))])
-            |> list.reverse()
+          case has_proper_remaining_single_quotes(c, rest, 0) {
+            True -> {
+              let result =
+                [Text(opening_smart_quote(c))]
+                |> list.append(parse_inline(list.reverse(acc), "", []))
+                |> list.append([Text(closing_smart_quote(c))])
+                |> list.reverse()
 
-          Some(#(result, rest))
+              Some(#(result, rest))
+            }
+            False -> None
+          }
         }
         False -> parse_smart_quote(rest, delim, c, [c, ..acc])
       }
@@ -472,6 +480,29 @@ fn parse_smart_quote(
 fn is_valid_previous_char_for_quote(c: String) -> Bool {
   case c {
     "\\" -> False
+    _ -> True
+  }
+}
+
+fn has_proper_remaining_single_quotes(
+  delim: String,
+  in: Chars,
+  count: Int,
+) -> Bool {
+  // only consider the remaining single quotes
+  case delim {
+    "'" -> {
+      case in {
+        [] -> count % 2 == 0
+
+        [c, ..rest] -> {
+          case c {
+            "'" -> has_proper_remaining_single_quotes("'", rest, count + 1)
+            _ -> has_proper_remaining_single_quotes("'", rest, count)
+          }
+        }
+      }
+    }
     _ -> True
   }
 }
