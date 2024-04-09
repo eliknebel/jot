@@ -36,6 +36,8 @@ pub type Container {
     language: Option(String),
     content: String,
   )
+  FencedDiv(attributes: Dict(String, String), content: List(Container))
+  Blockquote(List(Container))
 }
 
 pub type Inline {
@@ -137,10 +139,121 @@ fn parse_document(
       }
     }
 
+    [":", ..in2] -> {
+      case parse_fenced_div(in2, attrs, 1) {
+        None -> {
+          let #(paragraph, in) = parse_paragraph(in, attrs)
+          parse_document(in, refs, [paragraph, ..ast], dict.new())
+        }
+        Some(#(div, in)) -> parse_document(in, refs, [div, ..ast], dict.new())
+      }
+    }
+
+    [">", ..in2] -> {
+      let #(blockquote, in) = parse_blockquote(in2)
+      parse_document(in, refs, [blockquote, ..ast], dict.new())
+    }
+
     _ -> {
       let #(paragraph, in) = parse_paragraph(in, attrs)
       parse_document(in, refs, [paragraph, ..ast], dict.new())
     }
+  }
+}
+
+fn parse_blockquote(in: Chars) -> #(Container, Chars) {
+  let in = drop_spaces(in)
+
+  let #(inner_content, in) = take_until_blockquote_end(in, [])
+
+  let containers =
+    inner_content
+    |> parse_document(dict.new(), [], dict.new())
+    |> fn(d: Document) { d.content }
+
+  #(Blockquote(containers), in)
+}
+
+fn take_until_blockquote_end(in: Chars, acc: Chars) -> #(Chars, Chars) {
+  case in {
+    [] -> #(list.reverse(acc), [])
+    ["\n", "\n", ..rest] -> #(list.reverse(acc), rest)
+    [c, ..rest] -> take_until_blockquote_end(rest, [c, ..acc])
+  }
+}
+
+fn parse_fenced_div(
+  in: Chars,
+  attrs: Dict(String, String),
+  count: Int,
+) -> Option(#(Container, Chars)) {
+  case in {
+    [] -> None
+    [":", ..in] -> parse_fenced_div(in, attrs, count + 1)
+    [_, ..] if count >= 3 -> {
+      let #(maybe_class_name, in) = case parse_class_name(in, "") {
+        None -> #(None, in)
+        Some(#(class_name, in)) -> #(Some(class_name), in)
+      }
+
+      use #(inner_content, in) <- option.then(
+        take_until_fenced_div_end(in, count, 0, []),
+      )
+
+      let containers =
+        inner_content
+        |> parse_document(dict.new(), [], dict.new())
+        |> fn(d: Document) { d.content }
+
+      case maybe_class_name {
+        None -> Some(#(FencedDiv(attrs, containers), in))
+        Some(class_name) -> {
+          let attrs = add_attribute(attrs, "class", class_name)
+          Some(#(FencedDiv(attrs, containers), in))
+        }
+      }
+    }
+    _ -> None
+  }
+}
+
+fn parse_class_name(in: Chars, acc: String) -> Option(#(String, Chars)) {
+  case in {
+    [] -> None
+    [" ", ..in] -> parse_class_name(in, acc)
+    ["\n", ..] if acc == "" -> None
+    ["\n", ..in] -> Some(#(acc, in))
+    [c, ..in] -> parse_class_name(in, acc <> c)
+  }
+}
+
+fn take_until_fenced_div_end(
+  in: Chars,
+  count: Int,
+  running_count: Int,
+  acc: Chars,
+) -> Option(#(Chars, Chars)) {
+  case in {
+    [] -> None
+    ["\n", ..in] if count == running_count -> Some(#(list.reverse(acc), in))
+
+    // TODO: decide whether to continue if content exists on the same line as the closing fence
+    _ if count == running_count ->
+      Some(#(list.reverse(acc), collect_remaining_fence(in)))
+
+    // count down until we reach the same number of fence delimiters as the opening fence
+    [":", ..in] -> take_until_fenced_div_end(in, count, running_count + 1, acc)
+
+    // collect inner content as acc
+    [c, ..rest] -> take_until_fenced_div_end(rest, count, 0, [c, ..acc])
+  }
+}
+
+fn collect_remaining_fence(in: Chars) -> Chars {
+  case in {
+    [] -> []
+    ["\n", ..rest] -> rest
+    [_, ..rest] -> collect_remaining_fence(rest)
   }
 }
 
@@ -809,6 +922,22 @@ fn container_to_html(html: String, container: Container, refs: Refs) -> String {
       |> open_tag(tag, attrs)
       |> inlines_to_html(inlines, refs)
       |> close_tag(tag)
+    }
+
+    FencedDiv(attrs, content) -> {
+      html
+      |> open_tag("div", attrs)
+      |> string.append("\n")
+      |> string.append(containers_to_html(content, refs, ""))
+      |> close_tag("div")
+    }
+
+    Blockquote(content) -> {
+      html
+      |> open_tag("blockquote", dict.new())
+      |> string.append("\n")
+      |> string.append(containers_to_html(content, refs, ""))
+      |> close_tag("blockquote")
     }
   }
   <> "\n"

@@ -1,48 +1,3 @@
-Fenced divs are containers for sequences of blocks, to
-which an attribute can be attached.
-
-A fenced div begins with an opening fence: a line with
-three or more consecutive `:` characters, followed optionally by
-a class name and optionally whitespace.
-
-It ends with a closing fence: a line beginning with three
-or more consecutive `:` characters, followed by optional
-whitespace and the end of the line. The number of `:` characters
-in the closing fence must be at least the number in the opening fence.
-
-If the end of the input (or enclosing block) is encountered
-before a closing fence, the fenced div is implicitly closed.
-
-```
-:::::::::: foo
-Hi
-
-> A block quote.
-:::::::::::
-.
-<div class="foo">
-<p>Hi</p>
-<blockquote>
-<p>A block quote.</p>
-</blockquote>
-</div>
-```
-
-```
-{#bar .foo}
-:::
-Hi
-
-> A block quote.
-:::::::::::::
-.
-<div id="bar" class="foo">
-<p>Hi</p>
-<blockquote>
-<p>A block quote.</p>
-</blockquote>
-</div>
-```
 
 Fenced divs may be nested.
 
@@ -56,7 +11,7 @@ Hi
 :::
 ::::
 .
-<div id="bar" class="foo">
+<div class="foo" id="bar">
 <p>Hi</p>
 <div class="baz">
 <blockquote>
