@@ -38,6 +38,7 @@ pub type Container {
   )
   FencedDiv(attributes: Dict(String, String), content: List(Container))
   Blockquote(List(Container))
+  Component(name: String, props: List(#(String, String)))
 }
 
 pub type Inline {
@@ -59,11 +60,14 @@ type Chars =
 type Refs =
   Dict(String, String)
 
+type ComponentRenderer =
+  fn(String, List(#(String, String))) -> Result(String, Nil)
+
 // TODO: document
-pub fn to_html(djot: String) -> String {
+pub fn to_html(djot: String, render_component_html: ComponentRenderer) -> String {
   djot
   |> parse
-  |> document_to_html
+  |> document_to_html(render_component_html)
 }
 
 // TODO: document
@@ -98,6 +102,7 @@ fn parse_document(
 ) -> Document {
   let in = drop_lines(in)
   let in = drop_spaces(in)
+
   case in {
     [] -> Document(list.reverse(ast), refs)
 
@@ -154,10 +159,90 @@ fn parse_document(
       parse_document(in, refs, [blockquote, ..ast], dict.new())
     }
 
+    ["<", ..] -> {
+      case parse_component(in) {
+        None -> {
+          let #(paragraph, in) = parse_paragraph(in, attrs)
+          parse_document(in, refs, [paragraph, ..ast], dict.new())
+        }
+        Some(#(component, in)) ->
+          parse_document(in, refs, [component, ..ast], dict.new())
+      }
+    }
+
     _ -> {
       let #(paragraph, in) = parse_paragraph(in, attrs)
       parse_document(in, refs, [paragraph, ..ast], dict.new())
     }
+  }
+}
+
+fn parse_component(in: Chars) -> Option(#(Container, Chars)) {
+  case in {
+    ["<", ".", ..in] -> {
+      let #(name, in) = parse_component_name(in, "")
+      let #(props, in) = parse_component_props(in, [])
+      let in = drop_spaces(in)
+
+      Some(#(Component(name, props), in))
+    }
+    _ -> None
+  }
+}
+
+fn parse_component_name(in: Chars, name: String) -> #(String, Chars) {
+  case in {
+    [] -> #(name, [])
+    [" ", ..in] -> #(name, in)
+    [c, ..in] -> parse_component_name(in, name <> c)
+  }
+}
+
+fn parse_component_props(
+  in: Chars,
+  props: List(#(String, String)),
+) -> #(List(#(String, String)), Chars) {
+  case in {
+    [] -> #(props, [])
+    ["/", ">", ..in] -> #(props, in)
+    [">", ..] -> {
+      io.println_error(
+        "Unexpected '>' in component props. Expected '/>' or ' '.",
+      )
+      panic
+    }
+    [" ", ..in] -> parse_component_props(in, props)
+    _ -> {
+      let #(key, value, in) = parse_component_prop(in, "", "")
+      let props = [#(key, value), ..props]
+      parse_component_props(in, props)
+    }
+  }
+}
+
+fn parse_component_prop(
+  in: Chars,
+  key: String,
+  value: String,
+) -> #(String, String, Chars) {
+  case in {
+    [] -> #(key, value, [])
+    [" ", ..in] -> #(key, value, in)
+    ["=", "\"", ..in] -> parse_component_prop_value(in, key, value)
+    [c, ..in] -> parse_component_prop(in, key <> c, value)
+  }
+}
+
+fn parse_component_prop_value(
+  in: Chars,
+  key: String,
+  value: String,
+) -> #(String, String, Chars) {
+  case in {
+    [] -> #(key, value, [])
+    ["\"", ..in] -> #(key, value, in)
+    [" ", ..in] -> #(key, value, in)
+    [c, ..in] -> parse_component_prop_value(in, key, value <> c)
   }
 }
 
@@ -876,25 +961,39 @@ fn take_paragraph_chars(in: Chars, acc: Chars) -> #(Chars, Chars) {
 }
 
 // TODO: document
-pub fn document_to_html(document: Document) -> String {
-  containers_to_html(document.content, document.references, "")
+pub fn document_to_html(
+  document: Document,
+  render_component_html: ComponentRenderer,
+) -> String {
+  containers_to_html(
+    document.content,
+    document.references,
+    render_component_html,
+    "",
+  )
 }
 
 fn containers_to_html(
   containers: List(Container),
   refs: Refs,
+  render_component_html: ComponentRenderer,
   html: String,
 ) -> String {
   case containers {
     [] -> html
     [container, ..rest] -> {
-      let html = container_to_html(html, container, refs)
-      containers_to_html(rest, refs, html)
+      let html = container_to_html(html, container, refs, render_component_html)
+      containers_to_html(rest, refs, render_component_html, html)
     }
   }
 }
 
-fn container_to_html(html: String, container: Container, refs: Refs) -> String {
+fn container_to_html(
+  html: String,
+  container: Container,
+  refs: Refs,
+  render_component_html: ComponentRenderer,
+) -> String {
   case container {
     Paragraph(attrs, inlines) -> {
       html
@@ -928,7 +1027,12 @@ fn container_to_html(html: String, container: Container, refs: Refs) -> String {
       html
       |> open_tag("div", attrs)
       |> string.append("\n")
-      |> string.append(containers_to_html(content, refs, ""))
+      |> string.append(containers_to_html(
+        content,
+        refs,
+        render_component_html,
+        "",
+      ))
       |> close_tag("div")
     }
 
@@ -936,8 +1040,26 @@ fn container_to_html(html: String, container: Container, refs: Refs) -> String {
       html
       |> open_tag("blockquote", dict.new())
       |> string.append("\n")
-      |> string.append(containers_to_html(content, refs, ""))
+      |> string.append(containers_to_html(
+        content,
+        refs,
+        render_component_html,
+        "",
+      ))
       |> close_tag("blockquote")
+    }
+
+    Component(name, props) -> {
+      case render_component_html(name, props) {
+        Ok(component_html) -> {
+          html <> wrap_component_html(name, component_html, props)
+        }
+        Error(_) -> {
+          io.println_error("Component renderer not found: " <> name)
+
+          html
+        }
+      }
     }
   }
   <> "\n"
@@ -954,6 +1076,23 @@ fn open_tag(
 
 fn close_tag(html: String, tag: String) -> String {
   html <> "</" <> tag <> ">"
+}
+
+fn wrap_component_html(
+  name: String,
+  component_html: String,
+  props: List(#(String, String)),
+) -> String {
+  let data_props =
+    props
+    |> list.map(fn(prop) {
+      let #(k, v) = prop
+      #("data-prop-" <> k, v)
+    })
+
+  open_tag("", "div", dict.from_list([#("data-sprocket", name), ..data_props]))
+  <> component_html
+  <> close_tag("", "div")
 }
 
 fn inlines_to_html(html: String, inlines: List(Inline), refs: Refs) -> String {

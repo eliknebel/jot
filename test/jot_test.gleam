@@ -13,7 +13,7 @@ pub fn integration_test() {
   let tests = support.load_example_test_cases()
   use testcase <- list.each(tests)
 
-  let result = jot.to_html(testcase.djot)
+  let result = jot.to_html(testcase.djot, fn(_, _) { Error(Nil) })
   case result == testcase.html {
     True -> io.print_error(".")
     False -> {
