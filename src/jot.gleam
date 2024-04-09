@@ -709,7 +709,6 @@ fn take_until_forced_closing(
 ) -> Option(#(Chars, Chars)) {
   case in {
     [] -> None
-    [c, "}", ..rest] if c == delim -> Some(#(acc, rest))
     [c, ..rest] -> take_until_forced_closing(delim, rest, [c, ..acc])
   }
 }
@@ -718,11 +717,30 @@ fn take_until_closing(
   delim: String,
   in: Chars,
   acc: Chars,
+  verbatim: Bool,
 ) -> Option(#(Chars, Chars)) {
-  case in {
-    [] -> None
-    [c, ..rest] if c == delim -> Some(#(acc, rest))
-    [c, ..rest] -> take_until_closing(delim, rest, [c, ..acc])
+  case verbatim, in {
+    _, [] -> None
+    True, [c, ..rest] -> {
+      case c {
+        "`" -> take_until_closing(delim, rest, [c, ..acc], False)
+        _ -> take_until_closing(delim, rest, [c, ..acc], True)
+      }
+    }
+    _, [c, ..rest] if c == "`" ->
+      take_until_closing(delim, rest, [c, ..acc], True)
+    _, [c, ..rest] if c == delim -> {
+      let prev = case acc {
+        [] -> ""
+        [c, ..] -> c
+      }
+
+      case is_whitespace(prev) || is_escape(prev) {
+        True -> take_until_closing(delim, rest, [c, ..acc], False)
+        False -> Some(#(list.reverse(acc), rest))
+      }
+    }
+    _, [c, ..rest] -> take_until_closing(delim, rest, [c, ..acc], False)
   }
 }
 
@@ -808,32 +826,32 @@ fn emphasis(em: String) -> InlineParser {
     case in {
       [] -> None
       [c, ..rest] if c == em -> {
-        // ensure the previous and next characters are non-whitespace
+        // ensure the next character is non-whitespace
         let next_is_whitespace = case rest {
           [] -> False
-          [c, ..] -> is_whitespace(c)
+          [next_c, ..] -> is_whitespace(next_c)
         }
 
-        case string.last(text), next_is_whitespace {
-          _, True -> None
-          Ok(c), False ->
-            case is_whitespace(c) {
-              True -> None
-              False ->
-                case parse_until_closing(em, rest, "", "", []) {
-                  Some(#(parsed, in)) -> {
-                    let emphasis =
-                      parsed
-                      |> container_for_emphasis(em)
+        case next_is_whitespace {
+          True -> None
 
-                    Some(#([emphasis, Text(text), ..acc], in))
-                  }
-                  None -> None
-                }
-            }
-          _, False ->
-            case parse_until_closing(em, rest, "", "", []) {
-              Some(#(parsed, in)) -> {
+          // False ->
+          //   case parse_until_closing(em, rest, "", "", []) {
+          //     Some(#(parsed, in)) -> {
+          //       let emphasis =
+          //         parsed
+          //         |> container_for_emphasis(em)
+          //       Some(#([emphasis, Text(text), ..acc], in))
+          //     }
+          //     None -> None
+          //   }
+          False ->
+            case take_until_closing(em, rest, [], False) {
+              Some(#(inline_in, in)) -> {
+                let parsed =
+                  inline_in
+                  |> parse_inline("", [])
+
                 let emphasis =
                   parsed
                   |> container_for_emphasis(em)
@@ -851,6 +869,10 @@ fn emphasis(em: String) -> InlineParser {
 
 fn is_whitespace(c: String) -> Bool {
   c == " " || c == "\n" || c == "\t"
+}
+
+fn is_escape(c: String) -> Bool {
+  c == "\\"
 }
 
 fn container_for_emphasis(c: String) {

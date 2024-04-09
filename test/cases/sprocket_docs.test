@@ -1,0 +1,9 @@
+```
+::: foo
+Hi *with bold* and _italic_.
+:::
+.
+<div class="foo">
+<p>Hi <strong>with bold</strong> and <em>italic</em>.</p>
+</div>
+```
