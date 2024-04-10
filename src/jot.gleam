@@ -36,6 +36,7 @@ pub type Container {
     language: Option(String),
     content: String,
   )
+  RawBlock(format: String, content: String)
   FencedDiv(attributes: Dict(String, String), content: List(Container))
   Blockquote(List(Container))
   Component(name: String, props: List(#(String, String)))
@@ -347,23 +348,55 @@ fn parse_codeblock(
   attrs: Dict(String, String),
   delim: String,
 ) -> Option(#(Container, Chars)) {
-  use #(language, count, in) <- option.then(parse_codeblock_start(in, delim, 1))
+  use #(language, count, in, raw) <- option.then(parse_codeblock_start(
+    in,
+    delim,
+    1,
+  ))
   let #(content, in) = parse_codeblock_content(in, delim, count, "")
-  Some(#(Codeblock(attrs, language, content), in))
+
+  case raw {
+    True -> {
+      let format = case language {
+        Some(lang) -> lang
+        None -> ""
+      }
+
+      Some(#(RawBlock(format, content), in))
+    }
+    False -> {
+      Some(#(Codeblock(attrs, language, content), in))
+    }
+  }
 }
 
 fn parse_codeblock_start(
   in: Chars,
   delim: String,
   count: Int,
-) -> Option(#(Option(String), Int, Chars)) {
+) -> Option(#(Option(String), Int, Chars, Bool)) {
   case in {
     [c, ..in] if c == delim -> parse_codeblock_start(in, delim, count + 1)
-    ["\n", ..in] if count >= 3 -> Some(#(None, count, in))
+    ["\n", ..in] if count >= 3 -> Some(#(None, count, in, False))
     [_, ..] if count >= 3 -> {
       let in = drop_spaces(in)
       let #(language, in) = parse_codeblock_language(in, "")
-      Some(#(language, count, in))
+
+      let maybe_raw_format =
+        option.then(language, fn(lang) {
+          case string.first(lang) {
+            Ok("=") -> Some(string.drop_left(lang, 1))
+            _ -> None
+          }
+        })
+
+      case maybe_raw_format {
+        Some(format) -> {
+          // raw
+          Some(#(Some(format), count, in, True))
+        }
+        None -> Some(#(language, count, in, False))
+      }
     }
     _ -> None
   }
@@ -1022,6 +1055,7 @@ fn container_to_html(
       |> open_tag("p", attrs)
       |> inlines_to_html(inlines, refs)
       |> close_tag("p")
+      |> string.append("\n")
     }
 
     Codeblock(attrs, language, content) -> {
@@ -1035,6 +1069,7 @@ fn container_to_html(
       |> string.append(content)
       |> close_tag("code")
       |> close_tag("pre")
+      |> string.append("\n")
     }
 
     Heading(attrs, level, inlines) -> {
@@ -1043,6 +1078,7 @@ fn container_to_html(
       |> open_tag(tag, attrs)
       |> inlines_to_html(inlines, refs)
       |> close_tag(tag)
+      |> string.append("\n")
     }
 
     FencedDiv(attrs, content) -> {
@@ -1056,6 +1092,7 @@ fn container_to_html(
         "",
       ))
       |> close_tag("div")
+      |> string.append("\n")
     }
 
     Blockquote(content) -> {
@@ -1069,12 +1106,21 @@ fn container_to_html(
         "",
       ))
       |> close_tag("blockquote")
+      |> string.append("\n")
     }
+
+    RawBlock(format, content) ->
+      case format {
+        "html" ->
+          html
+          |> string.append(content)
+        _ -> html
+      }
 
     Component(name, props) -> {
       case render_component_html(name, props) {
         Ok(component_html) -> {
-          html <> wrap_component_html(name, component_html, props)
+          html <> wrap_component_html(name, component_html, props) <> "\n"
         }
         Error(_) -> {
           io.println_error("Component renderer not found: " <> name)
@@ -1084,7 +1130,6 @@ fn container_to_html(
       }
     }
   }
-  <> "\n"
 }
 
 fn open_tag(
