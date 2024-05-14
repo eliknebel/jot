@@ -1,0 +1,26 @@
+```
+::: foo
+Hi *with bold* and _italic_.
+:::
+.
+<div class="foo">
+<p>Hi <strong>with bold</strong> and <em>italic</em>.</p>
+</div>
+```
+
+# parses a raw block with =FORMAT
+````
+``` =html
+<video width="320" height="240" controls>
+  <source src="movie.mp4" type="video/mp4">
+  <source src="movie.ogg" type="video/ogg">
+  Your browser does not support the video tag.
+</video>
+```
+.
+<video width="320" height="240" controls>
+  <source src="movie.mp4" type="video/mp4">
+  <source src="movie.ogg" type="video/ogg">
+  Your browser does not support the video tag.
+</video>
+````

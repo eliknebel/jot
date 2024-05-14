@@ -1,5 +1,6 @@
 // TODO: collapse adjacent text nodes
 
+import gleam/io
 import gleam/dict.{type Dict}
 import gleam/int
 import gleam/list
@@ -35,6 +36,10 @@ pub type Container {
     language: Option(String),
     content: String,
   )
+  RawBlock(format: String, content: String)
+  FencedDiv(attributes: Dict(String, String), content: List(Container))
+  Blockquote(List(Container))
+  Component(name: String, props: List(#(String, String)))
 }
 
 pub type Inline {
@@ -56,16 +61,19 @@ type Chars =
 type Refs =
   Dict(String, String)
 
+type ComponentRenderer =
+  fn(String, List(#(String, String))) -> Result(String, Nil)
+
 /// Convert a string of Djot into a string of HTML.
 ///
 /// If you want to have more control over the HTML generated you can use the
 /// `parse` function to convert Djot to a tree of records instead. You can then
 /// traverse this tree and turn it into HTML yourself.
 ///
-pub fn to_html(djot: String) -> String {
+pub fn to_html(djot: String, render_component_html: ComponentRenderer) -> String {
   djot
   |> parse
-  |> document_to_html
+  |> document_to_html(render_component_html)
 }
 
 /// Convert a string of Djot into a tree of records.
@@ -104,6 +112,7 @@ fn parse_document(
 ) -> Document {
   let in = drop_lines(in)
   let in = drop_spaces(in)
+
   case in {
     [] -> Document(list.reverse(ast), refs)
 
@@ -145,10 +154,201 @@ fn parse_document(
       }
     }
 
+    [":", ..in2] -> {
+      case parse_fenced_div(in2, attrs, 1) {
+        None -> {
+          let #(paragraph, in) = parse_paragraph(in, attrs)
+          parse_document(in, refs, [paragraph, ..ast], dict.new())
+        }
+        Some(#(div, in)) -> parse_document(in, refs, [div, ..ast], dict.new())
+      }
+    }
+
+    [">", ..in2] -> {
+      let #(blockquote, in) = parse_blockquote(in2)
+      parse_document(in, refs, [blockquote, ..ast], dict.new())
+    }
+
+    ["<", ..] -> {
+      case parse_component(in) {
+        None -> {
+          let #(paragraph, in) = parse_paragraph(in, attrs)
+          parse_document(in, refs, [paragraph, ..ast], dict.new())
+        }
+        Some(#(component, in)) ->
+          parse_document(in, refs, [component, ..ast], dict.new())
+      }
+    }
+
     _ -> {
       let #(paragraph, in) = parse_paragraph(in, attrs)
       parse_document(in, refs, [paragraph, ..ast], dict.new())
     }
+  }
+}
+
+fn parse_component(in: Chars) -> Option(#(Container, Chars)) {
+  case in {
+    ["<", ".", ..in] -> {
+      let #(name, in) = parse_component_name(in, "")
+      let #(props, in) = parse_component_props(in, [])
+      let in = drop_spaces(in)
+
+      Some(#(Component(name, props), in))
+    }
+    _ -> None
+  }
+}
+
+fn parse_component_name(in: Chars, name: String) -> #(String, Chars) {
+  case in {
+    [] -> #(name, [])
+    [" ", ..in] -> #(name, in)
+    [c, ..in] -> parse_component_name(in, name <> c)
+  }
+}
+
+fn parse_component_props(
+  in: Chars,
+  props: List(#(String, String)),
+) -> #(List(#(String, String)), Chars) {
+  case in {
+    [] -> #(props, [])
+    ["/", ">", ..in] -> #(props, in)
+    [">", ..] -> {
+      io.println_error(
+        "Unexpected '>' in component props. Expected '/>' or ' '.",
+      )
+      panic
+    }
+    [" ", ..in] -> parse_component_props(in, props)
+    _ -> {
+      let #(key, value, in) = parse_component_prop(in, "", "")
+      let props = [#(key, value), ..props]
+      parse_component_props(in, props)
+    }
+  }
+}
+
+fn parse_component_prop(
+  in: Chars,
+  key: String,
+  value: String,
+) -> #(String, String, Chars) {
+  case in {
+    [] -> #(key, value, [])
+    [" ", ..in] -> #(key, value, in)
+    ["=", "\"", ..in] -> parse_component_prop_value(in, key, value)
+    [c, ..in] -> parse_component_prop(in, key <> c, value)
+  }
+}
+
+fn parse_component_prop_value(
+  in: Chars,
+  key: String,
+  value: String,
+) -> #(String, String, Chars) {
+  case in {
+    [] -> #(key, value, [])
+    ["\"", ..in] -> #(key, value, in)
+    [" ", ..in] -> #(key, value, in)
+    [c, ..in] -> parse_component_prop_value(in, key, value <> c)
+  }
+}
+
+fn parse_blockquote(in: Chars) -> #(Container, Chars) {
+  let in = drop_spaces(in)
+
+  let #(inner_content, in) = take_until_blockquote_end(in, [])
+
+  let containers =
+    inner_content
+    |> parse_document(dict.new(), [], dict.new())
+    |> fn(d: Document) { d.content }
+
+  #(Blockquote(containers), in)
+}
+
+fn take_until_blockquote_end(in: Chars, acc: Chars) -> #(Chars, Chars) {
+  case in {
+    [] -> #(list.reverse(acc), [])
+    ["\n", "\n", ..rest] -> #(list.reverse(acc), rest)
+    [c, ..rest] -> take_until_blockquote_end(rest, [c, ..acc])
+  }
+}
+
+fn parse_fenced_div(
+  in: Chars,
+  attrs: Dict(String, String),
+  count: Int,
+) -> Option(#(Container, Chars)) {
+  case in {
+    [] -> None
+    [":", ..in] -> parse_fenced_div(in, attrs, count + 1)
+    [_, ..] if count >= 3 -> {
+      let #(maybe_class_name, in) = case parse_class_name(in, "") {
+        None -> #(None, in)
+        Some(#(class_name, in)) -> #(Some(class_name), in)
+      }
+
+      use #(inner_content, in) <- option.then(
+        take_until_fenced_div_end(in, count, 0, []),
+      )
+
+      let containers =
+        inner_content
+        |> parse_document(dict.new(), [], dict.new())
+        |> fn(d: Document) { d.content }
+
+      case maybe_class_name {
+        None -> Some(#(FencedDiv(attrs, containers), in))
+        Some(class_name) -> {
+          let attrs = add_attribute(attrs, "class", class_name)
+          Some(#(FencedDiv(attrs, containers), in))
+        }
+      }
+    }
+    _ -> None
+  }
+}
+
+fn parse_class_name(in: Chars, acc: String) -> Option(#(String, Chars)) {
+  case in {
+    [] -> None
+    [" ", ..in] -> parse_class_name(in, acc)
+    ["\n", ..] if acc == "" -> None
+    ["\n", ..in] -> Some(#(acc, in))
+    [c, ..in] -> parse_class_name(in, acc <> c)
+  }
+}
+
+fn take_until_fenced_div_end(
+  in: Chars,
+  count: Int,
+  running_count: Int,
+  acc: Chars,
+) -> Option(#(Chars, Chars)) {
+  case in {
+    [] -> None
+    ["\n", ..in] if count == running_count -> Some(#(list.reverse(acc), in))
+
+    // TODO: decide whether to continue if content exists on the same line as the closing fence
+    _ if count == running_count ->
+      Some(#(list.reverse(acc), collect_remaining_fence(in)))
+
+    // count down until we reach the same number of fence delimiters as the opening fence
+    [":", ..in] -> take_until_fenced_div_end(in, count, running_count + 1, acc)
+
+    // collect inner content as acc
+    [c, ..rest] -> take_until_fenced_div_end(rest, count, 0, [c, ..acc])
+  }
+}
+
+fn collect_remaining_fence(in: Chars) -> Chars {
+  case in {
+    [] -> []
+    ["\n", ..rest] -> rest
+    [_, ..rest] -> collect_remaining_fence(rest)
   }
 }
 
@@ -157,23 +357,55 @@ fn parse_codeblock(
   attrs: Dict(String, String),
   delim: String,
 ) -> Option(#(Container, Chars)) {
-  use #(language, count, in) <- option.then(parse_codeblock_start(in, delim, 1))
+  use #(language, count, in, raw) <- option.then(parse_codeblock_start(
+    in,
+    delim,
+    1,
+  ))
   let #(content, in) = parse_codeblock_content(in, delim, count, "")
-  Some(#(Codeblock(attrs, language, content), in))
+
+  case raw {
+    True -> {
+      let format = case language {
+        Some(lang) -> lang
+        None -> ""
+      }
+
+      Some(#(RawBlock(format, content), in))
+    }
+    False -> {
+      Some(#(Codeblock(attrs, language, content), in))
+    }
+  }
 }
 
 fn parse_codeblock_start(
   in: Chars,
   delim: String,
   count: Int,
-) -> Option(#(Option(String), Int, Chars)) {
+) -> Option(#(Option(String), Int, Chars, Bool)) {
   case in {
     [c, ..in] if c == delim -> parse_codeblock_start(in, delim, count + 1)
-    ["\n", ..in] if count >= 3 -> Some(#(None, count, in))
+    ["\n", ..in] if count >= 3 -> Some(#(None, count, in, False))
     [_, ..] if count >= 3 -> {
       let in = drop_spaces(in)
       use #(language, in) <- option.map(parse_codeblock_language(in, ""))
-      #(language, count, in)
+
+      let maybe_raw_format =
+        option.then(language, fn(lang) {
+          case string.first(lang) {
+            Ok("=") -> Some(string.drop_left(lang, 1))
+            _ -> None
+          }
+        })
+
+      case maybe_raw_format {
+        Some(format) -> {
+          // raw
+          #(Some(format), count, in, True)
+        }
+        None -> #(language, count, in, False)
+      }
     }
     _ -> None
   }
@@ -587,6 +819,84 @@ fn parse_link(in: Chars) -> Option(#(Inline, Chars)) {
   }
 }
 
+fn take_until_forced_closing(
+  delim: String,
+  in: Chars,
+  acc: Chars,
+) -> Option(#(Chars, Chars)) {
+  case in {
+    [] -> None
+    [c, ..rest] -> take_until_forced_closing(delim, rest, [c, ..acc])
+  }
+}
+
+fn take_until_closing(
+  delim: String,
+  in: Chars,
+  acc: Chars,
+  verbatim: Bool,
+) -> Option(#(Chars, Chars)) {
+  case verbatim, in {
+    _, [] -> None
+    True, [c, ..rest] -> {
+      case c {
+        "`" -> take_until_closing(delim, rest, [c, ..acc], False)
+        _ -> take_until_closing(delim, rest, [c, ..acc], True)
+      }
+    }
+    _, [c, ..rest] if c == "`" ->
+      take_until_closing(delim, rest, [c, ..acc], True)
+    _, [c, ..rest] if c == delim -> {
+      let prev = case acc {
+        [] -> ""
+        [c, ..] -> c
+      }
+
+      case is_whitespace(prev) || is_escape(prev) {
+        True -> take_until_closing(delim, rest, [c, ..acc], False)
+        False -> Some(#(list.reverse(acc), rest))
+      }
+    }
+    _, [c, ..rest] -> take_until_closing(delim, rest, [c, ..acc], False)
+  }
+}
+
+fn take_until_last(
+  delim: String,
+  in: Chars,
+  acc: Chars,
+  result: Option(#(Chars, Chars)),
+) -> Option(#(Chars, Chars)) {
+  case in {
+    [] -> result
+    [c, ..rest] if c == delim ->
+      take_until_last(delim, rest, [c, ..acc], Some(#(acc, rest)))
+    [c, ..rest] -> take_until_last(delim, rest, [c, ..acc], result)
+  }
+}
+
+fn link(
+  in: Chars,
+  text: String,
+  acc: List(Inline),
+) -> Option(#(List(Inline), Chars)) {
+  case in {
+    [] -> None
+    ["[", ..rest] -> {
+      case take_link_chars(rest, []) {
+        None -> None
+        Some(#(inline_in, ref, in)) -> {
+          let inline = parse_inline(inline_in, "", [])
+          let link = Link(inline, ref)
+
+          Some(#([link, Text(text), ..acc], in))
+        }
+      }
+    }
+    [c, ..rest] -> link(rest, text <> c, acc)
+  }
+}
+
 fn take_link_chars(
   in: Chars,
   inline_in: Chars,
@@ -623,6 +933,14 @@ fn take_link_chars_destination(
     [c, ..rest] ->
       take_link_chars_destination(rest, is_url, inline_in, acc <> c)
   }
+}
+
+fn is_whitespace(c: String) -> Bool {
+  c == " " || c == "\n" || c == "\t"
+}
+
+fn is_escape(c: String) -> Bool {
+  c == "\\"
 }
 
 fn heading_level(in: Chars, level: Int) -> Option(#(Int, Chars)) {
@@ -671,31 +989,46 @@ fn take_paragraph_chars(in: Chars, acc: Chars) -> #(Chars, Chars) {
 
 /// Convert a document tree into a string of HTML.
 ///
-pub fn document_to_html(document: Document) -> String {
-  containers_to_html(document.content, document.references, "")
+pub fn document_to_html(
+  document: Document,
+  render_component_html: ComponentRenderer,
+) -> String {
+  containers_to_html(
+    document.content,
+    document.references,
+    render_component_html,
+    "",
+  )
 }
 
 fn containers_to_html(
   containers: List(Container),
   refs: Refs,
+  render_component_html: ComponentRenderer,
   html: String,
 ) -> String {
   case containers {
     [] -> html
     [container, ..rest] -> {
-      let html = container_to_html(html, container, refs)
-      containers_to_html(rest, refs, html)
+      let html = container_to_html(html, container, refs, render_component_html)
+      containers_to_html(rest, refs, render_component_html, html)
     }
   }
 }
 
-fn container_to_html(html: String, container: Container, refs: Refs) -> String {
+fn container_to_html(
+  html: String,
+  container: Container,
+  refs: Refs,
+  render_component_html: ComponentRenderer,
+) -> String {
   case container {
     Paragraph(attrs, inlines) -> {
       html
       |> open_tag("p", attrs)
       |> inlines_to_html(inlines, refs)
       |> close_tag("p")
+      |> string.append("\n")
     }
 
     Codeblock(attrs, language, content) -> {
@@ -709,6 +1042,7 @@ fn container_to_html(html: String, container: Container, refs: Refs) -> String {
       |> string.append(content)
       |> close_tag("code")
       |> close_tag("pre")
+      |> string.append("\n")
     }
 
     Heading(attrs, level, inlines) -> {
@@ -717,9 +1051,58 @@ fn container_to_html(html: String, container: Container, refs: Refs) -> String {
       |> open_tag(tag, attrs)
       |> inlines_to_html(inlines, refs)
       |> close_tag(tag)
+      |> string.append("\n")
+    }
+
+    FencedDiv(attrs, content) -> {
+      html
+      |> open_tag("div", attrs)
+      |> string.append("\n")
+      |> string.append(containers_to_html(
+        content,
+        refs,
+        render_component_html,
+        "",
+      ))
+      |> close_tag("div")
+      |> string.append("\n")
+    }
+
+    Blockquote(content) -> {
+      html
+      |> open_tag("blockquote", dict.new())
+      |> string.append("\n")
+      |> string.append(containers_to_html(
+        content,
+        refs,
+        render_component_html,
+        "",
+      ))
+      |> close_tag("blockquote")
+      |> string.append("\n")
+    }
+
+    RawBlock(format, content) ->
+      case format {
+        "html" ->
+          html
+          |> string.append(content)
+        _ -> html
+      }
+
+    Component(name, props) -> {
+      case render_component_html(name, props) {
+        Ok(component_html) -> {
+          html <> wrap_component_html(name, component_html, props) <> "\n"
+        }
+        Error(_) -> {
+          io.println_error("Component renderer not found: " <> name)
+
+          html
+        }
+      }
     }
   }
-  <> "\n"
 }
 
 fn open_tag(
@@ -733,6 +1116,23 @@ fn open_tag(
 
 fn close_tag(html: String, tag: String) -> String {
   html <> "</" <> tag <> ">"
+}
+
+fn wrap_component_html(
+  name: String,
+  component_html: String,
+  props: List(#(String, String)),
+) -> String {
+  let data_props =
+    props
+    |> list.map(fn(prop) {
+      let #(k, v) = prop
+      #("data-prop-" <> k, v)
+    })
+
+  open_tag("", "div", dict.from_list([#("data-sprocket", name), ..data_props]))
+  <> component_html
+  <> close_tag("", "div")
 }
 
 fn inlines_to_html(html: String, inlines: List(Inline), refs: Refs) -> String {
