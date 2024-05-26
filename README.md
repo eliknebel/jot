@@ -2,7 +2,7 @@
 
 A parser for [Djot][djot], a markdown-like language.
 
-[djot]: https://www.djot.net/
+[djot]: https://djot.net/
 
 [![Package Version](https://img.shields.io/hexpm/v/jot)](https://hex.pm/packages/jot)
 [![Hex Docs](https://img.shields.io/badge/hex-docs-ffaff3)](https://hexdocs.pm/jot/)
@@ -39,7 +39,8 @@ This project is a work in progress. So far it supports:
 - [x] Headings
 - [x] Paragraphs
 - [x] Links (inline and reference)
+- [x] Images
 - [x] Code blocks
 - [x] Inline code
-- [x] Block attributes
 - [x] Emphasis and strong
+- [x] Block attributes

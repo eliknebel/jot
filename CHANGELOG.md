@@ -1,5 +1,20 @@
 # Changelog
 
+## v1.0.0 - 2024-05-25
+
+- Support added for images.
+- Link text is used as reference label when label is empty.
+- Line breaks in links are parsed in accordance with the spec.
+
+## v0.6.0 - 2024-05-22
+
+- Fixed a bug where inline code endings would only be detected at the end of
+  the document.
+
+## v0.5.0 - 2024-04-30
+
+- Support added for inline code with backticks.
+
 ## v0.4.0 - 2024-04-19
 
 - Support added for `em` and `strong`.

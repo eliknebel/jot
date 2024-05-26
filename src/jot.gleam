@@ -45,6 +45,7 @@ pub type Container {
 pub type Inline {
   Text(String)
   Link(content: List(Inline), destination: Destination)
+  Image(content: List(Inline), destination: Destination)
   Emphasis(content: List(Inline))
   Strong(content: List(Inline))
   Code(content: String)
@@ -464,7 +465,7 @@ fn parse_codeblock_language(
 fn parse_ref_def(in: Chars, id: String) -> Option(#(String, String, Chars)) {
   case in {
     ["]", ":", ..in] -> parse_ref_value(in, id, "")
-    [] | ["]", ..] -> None
+    [] | ["]", ..] | ["\n", ..] -> None
     [c, ..in] -> parse_ref_def(in, id <> c)
   }
 }
@@ -476,6 +477,7 @@ fn parse_ref_value(
 ) -> Option(#(String, String, Chars)) {
   case in {
     [] -> Some(#(id, string.trim(url), []))
+    ["\n", " ", ..in] -> parse_ref_value(drop_spaces(in), id, url)
     ["\n", ..in] -> Some(#(id, string.trim(url), in))
     [c, ..in] -> parse_ref_value(in, id, url <> c)
   }
@@ -686,11 +688,17 @@ fn parse_inline(in: Chars, text: String, acc: List(Inline)) -> List(Inline) {
       }
     }
 
-    // Link
+    // Link and image
     ["[", ..rest] -> {
-      case parse_link(rest) {
+      case parse_link(rest, Link) {
         None -> parse_inline(rest, text <> "[", acc)
         Some(#(link, in)) -> parse_inline(in, "", [link, Text(text), ..acc])
+      }
+    }
+    ["!", "[", ..rest] -> {
+      case parse_link(rest, Image) {
+        None -> parse_inline(rest, text <> "![", acc)
+        Some(#(image, in)) -> parse_inline(in, "", [image, Text(text), ..acc])
       }
     }
 
@@ -734,7 +742,7 @@ fn parse_code_content(
   case in {
     [] -> #(content, in)
     ["`", ..in] -> {
-      let #(done, content, in) = parse_code_end(in, count, 0, content)
+      let #(done, content, in) = parse_code_end(in, count, 1, content)
       case done {
         True -> #(content, in)
         False -> parse_code_content(in, count, content)
@@ -752,17 +760,9 @@ fn parse_code_end(
 ) -> #(Bool, String, Chars) {
   case in {
     [] -> #(True, content, in)
-
-    // If there's another backtick it means that this is not the close of the
-    // inline code element.
-    ["`", "`", ..in] if limit == count -> {
-      #(False, content <> string.repeat("`", limit), in)
-    }
-
-    ["`", ..in] if limit == count -> #(True, content, in)
-
     ["`", ..in] -> parse_code_end(in, limit, count + 1, content)
-    [_, ..] -> #(False, content <> string.repeat("`", count + 1), in)
+    [_, ..] if limit == count -> #(True, content, in)
+    [_, ..] -> #(False, content <> string.repeat("`", count), in)
   }
 }
 
@@ -806,15 +806,21 @@ fn take_emphasis_chars(
   }
 }
 
-fn parse_link(in: Chars) -> Option(#(Inline, Chars)) {
+fn parse_link(
+  in: Chars,
+  to_inline: fn(List(Inline), Destination) -> Inline,
+) -> Option(#(Inline, Chars)) {
   case take_link_chars(in, []) {
     // This wasn't a link, it was just a `[` in the text
     None -> None
 
     Some(#(inline_in, ref, in)) -> {
       let inline = parse_inline(inline_in, "", [])
-      let link = Link(inline, ref)
-      Some(#(link, in))
+      let ref = case ref {
+        Reference("") -> Reference(take_inline_text(inline, ""))
+        ref -> ref
+      }
+      Some(#(to_inline(inline, ref), in))
     }
   }
 }
@@ -929,7 +935,10 @@ fn take_link_chars_destination(
     [")", ..in] if is_url -> Some(#(inline_in, Url(acc), in))
     ["]", ..in] if !is_url -> Some(#(inline_in, Reference(acc), in))
 
-    ["\n", ..rest] -> take_link_chars_destination(rest, is_url, inline_in, acc)
+    ["\n", ..rest] if is_url ->
+      take_link_chars_destination(rest, is_url, inline_in, acc)
+    ["\n", ..rest] if !is_url ->
+      take_link_chars_destination(rest, is_url, inline_in, acc <> " ")
     [c, ..rest] ->
       take_link_chars_destination(rest, is_url, inline_in, acc <> c)
   }
@@ -962,7 +971,7 @@ fn take_inline_text(inlines: List(Inline), acc: String) -> String {
         Text(text) | Code(text) -> take_inline_text(rest, acc <> text)
         Strong(inlines) | Emphasis(inlines) ->
           take_inline_text(list.append(inlines, rest), acc)
-        Link(nested, _) -> {
+        Link(nested, _) | Image(nested, _) -> {
           let acc = take_inline_text(nested, acc)
           take_inline_text(rest, acc)
         }
@@ -1164,9 +1173,17 @@ fn inline_to_html(html: String, inline: Inline, refs: Refs) -> String {
     }
     Link(text, destination) -> {
       html
-      |> open_tag("a", destination_attribute(destination, refs))
+      |> open_tag("a", destination_attribute("href", destination, refs))
       |> inlines_to_html(text, refs)
       |> close_tag("a")
+    }
+    Image(text, destination) -> {
+      html
+      |> open_tag(
+        "img",
+        destination_attribute("src", destination, refs)
+          |> dict.insert("alt", take_inline_text(text, "")),
+      )
     }
     Code(content) -> {
       html
@@ -1178,15 +1195,16 @@ fn inline_to_html(html: String, inline: Inline, refs: Refs) -> String {
 }
 
 fn destination_attribute(
+  key: String,
   destination: Destination,
   refs: Refs,
 ) -> Dict(String, String) {
   let dict = dict.new()
   case destination {
-    Url(url) -> dict.insert(dict, "href", url)
+    Url(url) -> dict.insert(dict, key, url)
     Reference(id) ->
       case dict.get(refs, id) {
-        Ok(url) -> dict.insert(dict, "href", url)
+        Ok(url) -> dict.insert(dict, key, url)
         Error(Nil) -> dict
       }
   }
