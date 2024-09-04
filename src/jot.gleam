@@ -18,7 +18,7 @@ fn add_attribute(
 ) -> Dict(String, String) {
   case key {
     "class" ->
-      dict.update(attributes, key, fn(previous) {
+      dict.upsert(attributes, key, fn(previous) {
         case previous {
           None -> value
           Some(previous) -> previous <> " " <> value
@@ -43,6 +43,7 @@ pub type Container {
 }
 
 pub type Inline {
+  Linebreak
   Text(String)
   Link(content: List(Inline), destination: Destination)
   Image(content: List(Inline), destination: Destination)
@@ -670,6 +671,53 @@ fn parse_inline(in: Chars, text: String, acc: List(Inline)) -> List(Inline) {
     [] if text == "" -> list.reverse(acc)
     [] -> parse_inline([], "", [Text(text), ..acc])
 
+    // Escapes
+    ["\\", c, ..rest] -> {
+      case c {
+        "\n" -> {
+          parse_inline(rest, "", [Linebreak, Text(text), ..acc])
+        }
+        " " -> {
+          parse_inline(rest, text <> "&nbsp;", acc)
+        }
+        "!"
+        | "\""
+        | "#"
+        | "$"
+        | "%"
+        | "&"
+        | "'"
+        | "("
+        | ")"
+        | "*"
+        | "+"
+        | ","
+        | "-"
+        | "."
+        | "/"
+        | ":"
+        | ";"
+        | "<"
+        | "="
+        | ">"
+        | "?"
+        | "@"
+        | "["
+        | "\\"
+        | "]"
+        | "^"
+        | "_"
+        | "`"
+        | "{"
+        | "|"
+        | "}"
+        | "~" -> {
+          parse_inline(rest, text <> c, acc)
+        }
+        _ -> parse_inline(list.append([c], rest), text <> "\\", acc)
+      }
+    }
+
     // Emphasis and strong
     ["_", c, ..rest] if c != " " && c != "\t" && c != "\n" -> {
       let rest = [c, ..rest]
@@ -975,6 +1023,9 @@ fn take_inline_text(inlines: List(Inline), acc: String) -> String {
           let acc = take_inline_text(nested, acc)
           take_inline_text(rest, acc)
         }
+        Linebreak -> {
+          take_inline_text(rest, acc)
+        }
       }
   }
 }
@@ -1158,7 +1209,14 @@ fn inlines_to_html(html: String, inlines: List(Inline), refs: Refs) -> String {
 
 fn inline_to_html(html: String, inline: Inline, refs: Refs) -> String {
   case inline {
-    Text(text) -> html <> text
+    Linebreak -> {
+      html
+      |> open_tag("br", dict.new())
+      |> string.append("\n")
+    }
+    Text(text) -> {
+      html <> text
+    }
     Strong(inlines) -> {
       html
       |> open_tag("strong", dict.new())
