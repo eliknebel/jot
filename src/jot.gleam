@@ -1,11 +1,13 @@
-// TODO: collapse adjacent text nodes
+// forked from https://github.com/lpil/jot, customized to support sprocket component markup
+// formatted as <.somecomponent some="prop" />
 
-import gleam/io
 import gleam/dict.{type Dict}
 import gleam/int
+import gleam/io
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/string
+import gleam/string_builder
 
 pub type Document {
   Document(content: List(Container), references: Dict(String, String))
@@ -205,7 +207,8 @@ fn parse_component(in: Chars) -> Option(#(Container, Chars)) {
 fn parse_component_name(in: Chars, name: String) -> #(String, Chars) {
   case in {
     [] -> #(name, [])
-    [" ", ..in] -> #(name, in)
+    [" ", ..] -> #(name, in)
+    [">", ..] -> #(name, in)
     [c, ..in] -> parse_component_name(in, name <> c)
   }
 }
@@ -217,11 +220,15 @@ fn parse_component_props(
   case in {
     [] -> #(props, [])
     ["/", ">", ..in] -> #(props, in)
-    [">", ..] -> {
-      io.println_error(
-        "Unexpected '>' in component props. Expected '/>' or ' '.",
-      )
-      panic
+    [">", ..in] -> {
+      // If component has a body, parse the body as a string and add it to the
+      // list of props as "inner_html"
+      let in = drop_lines(in)
+
+      case parse_component_body(in, None) {
+        None -> #(props, [])
+        Some(#(inner_html, in)) -> #([#("inner_html", inner_html), ..props], in)
+      }
     }
     [" ", ..in] -> parse_component_props(in, props)
     _ -> {
@@ -252,9 +259,40 @@ fn parse_component_prop_value(
 ) -> #(String, String, Chars) {
   case in {
     [] -> #(key, value, [])
-    ["\"", ..in] -> #(key, value, in)
-    [" ", ..in] -> #(key, value, in)
+    ["\"", ..in] -> {
+      case is_escaped(value) {
+        True -> parse_component_prop_value(in, key, value <> "\"")
+        False -> #(key, value, in)
+      }
+    }
     [c, ..in] -> parse_component_prop_value(in, key, value <> c)
+  }
+}
+
+fn is_escaped(value: String) -> Bool {
+  case string.last(value) {
+    Ok("\\") -> True
+    _ -> False
+  }
+}
+
+fn parse_component_body(
+  in: Chars,
+  acc: Option(String),
+) -> Option(#(String, Chars)) {
+  case in {
+    [] -> None
+    ["<", "/", ".", ..in] -> {
+      let in = drop_spaces(in)
+      let #(_name, in) = parse_component_name(in, "")
+      let in = drop_spaces(in)
+
+      case in {
+        [">", ..in] -> option.map(acc, fn(a) { #(a, in) })
+        _ -> None
+      }
+    }
+    [c, ..in] -> parse_component_body(in, Some(option.unwrap(acc, "") <> c))
   }
 }
 
@@ -1273,6 +1311,28 @@ fn attributes_to_html(html: String, attributes: Dict(String, String)) -> String 
   |> dict.to_list
   |> list.sort(fn(a, b) { string.compare(a.0, b.0) })
   |> list.fold(html, fn(html, pair) {
-    html <> " " <> pair.0 <> "=\"" <> pair.1 <> "\""
+    html <> " " <> escape_html(pair.0) <> "=\"" <> escape_html(pair.1) <> "\""
   })
+}
+
+fn safe_replace_char(key: String) -> String {
+  case key {
+    "&" -> "&amp;"
+    "<" -> "&lt;"
+    ">" -> "&gt;"
+    "\"" -> "&quot;"
+    "'" -> "&#39;"
+    "/" -> "&#x2F;"
+    "`" -> "&#x60;"
+    "=" -> "&#x3D;"
+    _ -> key
+  }
+}
+
+pub fn escape_html(unsafe: String) {
+  string.to_graphemes(unsafe)
+  |> list.fold(string_builder.new(), fn(sb, grapheme) {
+    string_builder.append(sb, safe_replace_char(grapheme))
+  })
+  |> string_builder.to_string
 }
